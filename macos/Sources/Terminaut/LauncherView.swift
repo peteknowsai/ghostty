@@ -312,14 +312,7 @@ struct ProjectTile: View {
     var isActive: Bool = false
 
     private var displayName: String {
-        // Remove trailing path component if it duplicates the project name
-        let pathLastComponent = (project.path as NSString).lastPathComponent
-        if project.name == pathLastComponent {
-            // Get parent directory name if available
-            let pathParent = ((project.path as NSString).deletingLastPathComponent as NSString).lastPathComponent
-            return pathParent.isEmpty ? project.name : pathParent
-        }
-        return project.name
+        project.name
     }
 
     private var lastOpenedText: String? {
