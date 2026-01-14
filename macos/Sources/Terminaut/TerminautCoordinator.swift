@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import GhosttyKit
+import Combine
 
 /// Coordinates Terminaut state - launcher vs session, active project, etc.
 /// No longer manages windows - that's handled by SwiftUI in TerminautRootView
@@ -9,6 +10,10 @@ class TerminautCoordinator: ObservableObject {
 
     /// True when showing the launcher, false when in a session
     @Published var showLauncher: Bool = true
+
+    /// Controller manager for game controller input
+    let controllerManager = GameControllerManager.shared
+    private var controllerCancellables = Set<AnyCancellable>()
 
     /// The currently active project (when in session mode)
     @Published var activeProject: Project?
@@ -40,12 +45,110 @@ class TerminautCoordinator: ObservableObject {
 
     private init() {
         setupMenuItems()
+        setupControllerBindings()
+        controllerManager.start()
+    }
+
+    // MARK: - Controller Handling (Global)
+
+    private func setupControllerBindings() {
+        // Handle button presses globally (works in both launcher and session)
+        controllerManager.$lastButtonPress
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] button in
+                self?.handleControllerButton(button)
+            }
+            .store(in: &controllerCancellables)
+    }
+
+    private func handleControllerButton(_ button: GameControllerManager.ControllerButton) {
+        // Global actions that work regardless of current view
+        switch button {
+        case .select:
+            // Select = Return to launcher (like Cmd+L)
+            returnToLauncher()
+        case .leftBumper:
+            // L = Previous tab
+            previousSession()
+        case .rightBumper:
+            // R = Next tab
+            nextSession()
+        case .a:
+            // A = Enter (when in session)
+            if !showLauncher {
+                simulateKey(keyCode: 36) // Return/Enter
+            }
+        case .b:
+            // B = Escape (when in session)
+            if !showLauncher {
+                simulateKey(keyCode: 53) // Escape
+            }
+        default:
+            // Other buttons are handled by the active view (LauncherView or SessionView)
+            break
+        }
+    }
+
+    /// Simulate a key press - sends directly to terminal surface
+    private func simulateKey(keyCode: CGKeyCode) {
+        // Get the current terminal surface view
+        guard selectedSessionIndex < activeSessions.count,
+              let surfaceView = activeSessions[selectedSessionIndex].surfaceView else {
+            return
+        }
+
+        // Get the AppKit view from the SwiftUI wrapper
+        guard let window = NSApp.keyWindow,
+              let contentView = window.contentView else {
+            return
+        }
+
+        // Create NSEvent for key down
+        if let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: keyCode == 36 ? "\r" : "\u{1B}",  // Return or Escape
+            charactersIgnoringModifiers: keyCode == 36 ? "\r" : "\u{1B}",
+            isARepeat: false,
+            keyCode: UInt16(keyCode)
+        ) {
+            // Send to the first responder (should be terminal)
+            window.sendEvent(event)
+        }
+
+        // Create NSEvent for key up
+        if let event = NSEvent.keyEvent(
+            with: .keyUp,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: keyCode == 36 ? "\r" : "\u{1B}",
+            charactersIgnoringModifiers: keyCode == 36 ? "\r" : "\u{1B}",
+            isARepeat: false,
+            keyCode: UInt16(keyCode)
+        ) {
+            window.sendEvent(event)
+        }
     }
 
     // MARK: - Navigation
 
+    /// Launch modes for opening a project
+    enum LaunchMode {
+        case continueSession      // claude -c (default)
+        case freshSession         // claude (new session)
+        case resumeSession(String) // claude --resume <session-id>
+    }
+
     /// Launch a project - transitions from launcher to session
-    func launchProject(_ project: Project) {
+    func launchProject(_ project: Project, mode: LaunchMode = .continueSession) {
         // Mark project as opened
         ProjectStore.shared.markOpened(project)
 
@@ -63,7 +166,17 @@ class TerminautCoordinator: ObservableObject {
                 config.workingDirectory = project.path
                 // Claude Code has slow startup for non-Apple terminals - this workaround fixes it
                 config.environmentVariables["TERM_PROGRAM"] = "Apple_Terminal"
-                config.initialInput = "exec claude -c\n"
+
+                // Set command based on launch mode
+                switch mode {
+                case .continueSession:
+                    config.initialInput = "exec claude -c\n"
+                case .freshSession:
+                    config.initialInput = "exec claude\n"
+                case .resumeSession(let sessionId):
+                    config.initialInput = "exec claude --resume \(sessionId)\n"
+                }
+
                 surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
             }
 
@@ -79,6 +192,16 @@ class TerminautCoordinator: ObservableObject {
         }
 
         showLauncher = false
+    }
+
+    /// Launch project with a fresh session (no -c flag)
+    func launchFreshSession(_ project: Project) {
+        launchProject(project, mode: .freshSession)
+    }
+
+    /// Resume a specific Claude session by ID
+    func resumeSession(_ project: Project, sessionId: String) {
+        launchProject(project, mode: .resumeSession(sessionId))
     }
 
     /// Return to launcher from session

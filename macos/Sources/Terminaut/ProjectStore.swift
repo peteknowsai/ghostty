@@ -50,9 +50,55 @@ class ProjectStore: ObservableObject {
         do {
             let data = try Data(contentsOf: projectsURL)
             projects = try JSONDecoder().decode([Project].self, from: data)
+
+            // If no projects have lastOpened, try to recover from Claude session dirs
+            let hasAnyLastOpened = projects.contains { $0.lastOpened != nil }
+            if !hasAnyLastOpened && !projects.isEmpty {
+                recoverLastOpenedFromClaudeSessions()
+            }
         } catch {
             print("Failed to load projects: \(error)")
             scanForProjects()
+        }
+    }
+
+    /// Recover lastOpened dates from Claude Code session directory timestamps
+    private func recoverLastOpenedFromClaudeSessions() {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let claudeProjectsDir = home.appendingPathComponent(".claude/projects")
+
+        guard FileManager.default.fileExists(atPath: claudeProjectsDir.path) else { return }
+
+        var updated = false
+
+        for i in 0..<projects.count {
+            let project = projects[i]
+            // Claude encodes paths like: /Users/pete/Projects/foo -> -Users-pete-Projects-foo
+            let encodedPath = project.path.replacingOccurrences(of: "/", with: "-")
+            let sessionDir = claudeProjectsDir.appendingPathComponent(encodedPath)
+
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: sessionDir.path),
+               let modDate = attrs[.modificationDate] as? Date {
+                projects[i].lastOpened = modDate
+                updated = true
+            }
+        }
+
+        if updated {
+            // Re-sort by lastOpened
+            projects.sort { p1, p2 in
+                if let d1 = p1.lastOpened, let d2 = p2.lastOpened {
+                    return d1 > d2
+                } else if p1.lastOpened != nil {
+                    return true
+                } else if p2.lastOpened != nil {
+                    return false
+                } else {
+                    return p1.name.localizedCaseInsensitiveCompare(p2.name) == .orderedAscending
+                }
+            }
+            saveProjects()
+            print("Recovered lastOpened dates from Claude session directories")
         }
     }
 
@@ -67,7 +113,7 @@ class ProjectStore: ObservableObject {
         }
     }
 
-    /// Scan common directories for projects
+    /// Scan common directories for projects (merges with existing, preserves metadata)
     func scanForProjects() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let projectDirs = [
@@ -76,7 +122,14 @@ class ProjectStore: ObservableObject {
             home.appendingPathComponent("Code"),
         ]
 
-        var foundProjects: [Project] = []
+        // Build a map of existing projects by path for quick lookup
+        var existingByPath: [String: Project] = [:]
+        for project in projects {
+            existingByPath[project.path] = project
+        }
+
+        var mergedProjects: [Project] = []
+        var seenPaths: Set<String> = []
 
         for dir in projectDirs {
             guard let contents = try? FileManager.default.contentsOfDirectory(
@@ -102,19 +155,48 @@ class ProjectStore: ObservableObject {
                     }
 
                     if isProject {
-                        foundProjects.append(Project(
-                            name: url.lastPathComponent,
-                            path: url.path
-                        ))
+                        let path = url.path
+                        if !seenPaths.contains(path) {
+                            seenPaths.insert(path)
+                            // Preserve existing project if we have it (keeps id, lastOpened, etc.)
+                            if let existing = existingByPath[path] {
+                                mergedProjects.append(existing)
+                            } else {
+                                mergedProjects.append(Project(
+                                    name: url.lastPathComponent,
+                                    path: path
+                                ))
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Sort by name
-        foundProjects.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // Also keep any manually-added projects that weren't in scanned dirs
+        for project in projects {
+            if !seenPaths.contains(project.path) {
+                // Check if path still exists
+                if FileManager.default.fileExists(atPath: project.path) {
+                    mergedProjects.append(project)
+                }
+            }
+        }
 
-        projects = foundProjects
+        // Sort: recently opened first, then by name
+        mergedProjects.sort { p1, p2 in
+            if let d1 = p1.lastOpened, let d2 = p2.lastOpened {
+                return d1 > d2  // Most recent first
+            } else if p1.lastOpened != nil {
+                return true  // Projects with lastOpened come first
+            } else if p2.lastOpened != nil {
+                return false
+            } else {
+                return p1.name.localizedCaseInsensitiveCompare(p2.name) == .orderedAscending
+            }
+        }
+
+        projects = mergedProjects
         saveProjects()
     }
 

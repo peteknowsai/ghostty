@@ -1,17 +1,29 @@
 import SwiftUI
 import AppKit
+import Combine
 
 /// Game-style full-screen project launcher
 struct LauncherView: View {
     @ObservedObject var projectStore: ProjectStore
+    @ObservedObject var controllerManager = GameControllerManager.shared
     @State private var displaySelectedIndex: Int = 0
     @FocusState private var isFocused: Bool
     @State private var keyboardViewId: UUID = UUID()
+
+    /// Session picker state
+    @State private var showSessionPicker: Bool = false
+    @State private var sessionPickerProject: Project? = nil
+    @State private var sessionsForPicker: [ClaudeSession] = []
+
+    /// Controller event subscriptions
+    @State private var controllerCancellables = Set<AnyCancellable>()
 
     /// Active session project IDs in activation order (first activated = first in array)
     var activeProjectIdsOrdered: [UUID] = []
 
     var onSelect: (Project) -> Void
+    var onFreshSession: ((Project) -> Void)? = nil
+    var onResumeSession: ((Project, String) -> Void)? = nil
 
     /// Set for quick lookup
     private var activeProjectIds: Set<UUID> {
@@ -101,10 +113,41 @@ struct LauncherView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 keyboardViewId = UUID()
             }
+
+            // Start controller discovery
+            controllerManager.start()
+            setupControllerBindings()
+        }
+        .onDisappear {
+            controllerCancellables.removeAll()
         }
         .background(KeyboardHandlerView { event in
             handleKeyEvent(event)
         }.id(keyboardViewId))
+        .overlay {
+            if showSessionPicker, let project = sessionPickerProject {
+                SessionPickerView(
+                    project: project,
+                    sessions: sessionsForPicker,
+                    onSelect: { session in
+                        showSessionPicker = false
+                        if let session = session {
+                            onResumeSession?(project, session.id)
+                        }
+                        // Restore keyboard focus to launcher
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            keyboardViewId = UUID()
+                        }
+                    },
+                    onNewSession: {
+                        showSessionPicker = false
+                        onFreshSession?(project)
+                    }
+                )
+                .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: showSessionPicker)
     }
 
     // MARK: - Subviews
@@ -139,22 +182,53 @@ struct LauncherView: View {
 
     private var footerView: some View {
         HStack {
-            Text(appVersion)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.orange)
+            // Left: Version + controller status
+            HStack(spacing: 12) {
+                Text(appVersion)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.orange)
 
-            Spacer()
-
-            HStack(spacing: 40) {
-                controlHint(key: "Arrow Keys", action: "Navigate")
-                controlHint(key: "Enter", action: "Launch")
-                controlHint(key: "R", action: "Rescan")
-                controlHint(key: "Esc", action: "Quit")
+                if controllerManager.isConnected {
+                    HStack(spacing: 4) {
+                        Image(systemName: "gamecontroller.fill")
+                            .foregroundColor(.green)
+                        Text(controllerManager.controllerName)
+                            .foregroundColor(.green)
+                        if let battery = controllerManager.batteryPercentage {
+                            Text("(\(battery)%)")
+                                .foregroundColor(.green.opacity(0.7))
+                        }
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                }
             }
 
             Spacer()
 
-            // Spacer to balance the version on the left
+            // Center: Control hints (show controller buttons if connected)
+            if controllerManager.isConnected {
+                HStack(spacing: 24) {
+                    controlHint(key: "D-Pad", action: "Navigate")
+                    controlHint(key: "A", action: "Continue")
+                    controlHint(key: "X", action: "New")
+                    controlHint(key: "Y", action: "Sessions")
+                    controlHint(key: "Start", action: "Rescan")
+                    controlHint(key: "B", action: "Quit")
+                }
+            } else {
+                HStack(spacing: 24) {
+                    controlHint(key: "Arrows", action: "Navigate")
+                    controlHint(key: "Enter", action: "Continue")
+                    controlHint(key: "N", action: "New")
+                    controlHint(key: "S", action: "Sessions")
+                    controlHint(key: "R", action: "Rescan")
+                    controlHint(key: "Esc", action: "Quit")
+                }
+            }
+
+            Spacer()
+
+            // Right: Balance spacer
             Text(appVersion)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(.clear)
@@ -180,9 +254,83 @@ struct LauncherView: View {
         }
     }
 
+    // MARK: - Controller Handling
+
+    private func setupControllerBindings() {
+        let projects = filteredProjects
+
+        // Handle D-pad and thumbstick directions
+        controllerManager.$lastDirection
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [self] direction in
+                guard !showSessionPicker else { return }
+                let projects = filteredProjects
+                guard !projects.isEmpty else { return }
+
+                switch direction {
+                case .up:
+                    moveVertical(by: -1, in: projects)
+                case .down:
+                    moveVertical(by: 1, in: projects)
+                case .left:
+                    moveHorizontal(by: -1, in: projects)
+                case .right:
+                    moveHorizontal(by: 1, in: projects)
+                }
+            }
+            .store(in: &controllerCancellables)
+
+        // Handle button presses
+        controllerManager.$lastButtonPress
+            .compactMap { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [self] button in
+                let projects = filteredProjects
+                guard !projects.isEmpty else { return }
+
+                switch button {
+                case .a:
+                    // A = Confirm (Enter)
+                    if displaySelectedIndex < projects.count {
+                        onSelect(projects[displaySelectedIndex])
+                    }
+                case .b:
+                    // B = Back/Escape - quit from launcher
+                    NSApp.terminate(nil)
+                case .x:
+                    // X = New session (N key)
+                    if displaySelectedIndex < projects.count {
+                        onFreshSession?(projects[displaySelectedIndex])
+                    }
+                case .y:
+                    // Y = Sessions list (S key)
+                    if displaySelectedIndex < projects.count {
+                        showSessionPickerForProject(projects[displaySelectedIndex])
+                    }
+                case .leftBumper:
+                    // L = Previous tab
+                    TerminautCoordinator.shared.previousSession()
+                case .rightBumper:
+                    // R = Next tab
+                    TerminautCoordinator.shared.nextSession()
+                case .start:
+                    // Start = Menu (rescan for now)
+                    projectStore.scanForProjects()
+                case .select:
+                    // Select = Options (return to launcher if in session)
+                    TerminautCoordinator.shared.returnToLauncher()
+                }
+            }
+            .store(in: &controllerCancellables)
+    }
+
     // MARK: - Keyboard Handling
 
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
+        // Don't handle events when session picker is showing
+        guard !showSessionPicker else { return false }
+
         let projects = filteredProjects
         guard !projects.isEmpty else { return false }
 
@@ -204,7 +352,23 @@ struct LauncherView: View {
                 onSelect(projects[displaySelectedIndex])
             }
             return true
-        case 15: // R key
+        case 45: // N key - new fresh session
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+                if displaySelectedIndex < projects.count {
+                    onFreshSession?(projects[displaySelectedIndex])
+                }
+                return true
+            }
+            return false
+        case 1: // S key - show session picker
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+                if displaySelectedIndex < projects.count {
+                    showSessionPickerForProject(projects[displaySelectedIndex])
+                }
+                return true
+            }
+            return false
+        case 15: // R key - rescan
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
                 projectStore.scanForProjects()
                 return true
@@ -213,6 +377,12 @@ struct LauncherView: View {
         default:
             return false
         }
+    }
+
+    private func showSessionPickerForProject(_ project: Project) {
+        sessionPickerProject = project
+        sessionsForPicker = SessionStore.shared.getSessions(for: project.path)
+        showSessionPicker = true
     }
 
     private func moveVertical(by rowDelta: Int, in projects: [Project]) {
@@ -441,8 +611,17 @@ struct AddProjectTile: View {
 }
 
 #Preview {
-    LauncherView(projectStore: ProjectStore.shared) { project in
-        print("Selected: \(project.name)")
-    }
+    LauncherView(
+        projectStore: ProjectStore.shared,
+        onSelect: { project in
+            print("Selected: \(project.name)")
+        },
+        onFreshSession: { project in
+            print("Fresh session: \(project.name)")
+        },
+        onResumeSession: { project, sessionId in
+            print("Resume \(sessionId) in \(project.name)")
+        }
+    )
     .frame(width: 1200, height: 800)
 }
