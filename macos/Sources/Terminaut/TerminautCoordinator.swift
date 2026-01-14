@@ -104,10 +104,12 @@ class TerminautCoordinator: ObservableObject {
             return
         case .leftBumper:
             // L bumper = Previous tab (always)
+            print("🎮 L bumper -> previousSession (sessions: \(activeSessions.count))")
             previousSession()
             return
         case .rightBumper:
             // R bumper = Next tab (always)
+            print("🎮 R bumper -> nextSession (sessions: \(activeSessions.count))")
             nextSession()
             return
         default:
@@ -433,12 +435,15 @@ class TerminautCoordinator: ObservableObject {
 
     /// Close session at specific index - always returns to launcher
     func closeSession(at index: Int) {
+        print("🔴 closeSession called: index=\(index), totalSessions=\(activeSessions.count)")
         guard index >= 0, index < activeSessions.count else {
+            print("🔴 closeSession: invalid index, returning to launcher")
             returnToLauncher()
             return
         }
 
         let closedProject = activeSessions[index].project
+        print("🔴 Removing session for: \(closedProject.name)")
         activeSessions.remove(at: index)
 
         // Remove from activation order when session closes

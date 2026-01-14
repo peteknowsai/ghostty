@@ -17,6 +17,7 @@ struct TerminautRootView: View {
                     projectStore: ProjectStore.shared,
                     activeProjectIdsOrdered: coordinator.activeProjectIdsOrdered,
                     onSelect: { project in
+                        print("🟢 LauncherView onSelect: \(project.name)")
                         coordinator.launchProject(project)
                     },
                     onFreshSession: { project in
@@ -102,14 +103,21 @@ struct TerminautSessionView: View {
         }
         .onReceive(closeSurfacePublisher) { notification in
             // When a surface closes (e.g., user types "exit"), close that session
-            guard let surface = notification.object as? Ghostty.SurfaceView else { return }
+            guard let surface = notification.object as? Ghostty.SurfaceView else {
+                print("🔴 closeSurface: no surface in notification")
+                return
+            }
             let processAlive = notification.userInfo?["process_alive"] as? Bool ?? true
+            print("🔴 closeSurface received: processAlive=\(processAlive), sessions=\(coordinator.activeSessions.count)")
 
             // Only auto-close if the process exited (not alive)
             if !processAlive {
                 // Find which session this surface belongs to and close it
                 if let index = coordinator.activeSessions.firstIndex(where: { $0.surfaceView === surface }) {
+                    print("🔴 Closing session at index \(index)")
                     coordinator.closeSession(at: index)
+                } else {
+                    print("🔴 Surface not found in active sessions!")
                 }
             }
         }
@@ -131,9 +139,14 @@ struct TerminautSessionView: View {
 
     /// Focus the terminal surface so user can type immediately
     private func focusTerminal(_ surfaceView: Ghostty.SurfaceView) {
-        // Small delay to ensure view is in hierarchy
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            surfaceView.window?.makeFirstResponder(surfaceView)
+        // Multiple attempts to ensure focus is grabbed after view transition
+        for delay in [0.1, 0.3, 0.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if let window = surfaceView.window {
+                    window.makeFirstResponder(surfaceView)
+                    print("🎯 Focused terminal (delay: \(delay))")
+                }
+            }
         }
     }
 

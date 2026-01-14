@@ -18,6 +18,9 @@ struct LauncherView: View {
     /// Controller event subscriptions
     @State private var controllerCancellables = Set<AnyCancellable>()
 
+    /// Ignore controller input briefly after appearing (prevents stale events)
+    @State private var ignoreControllerInput: Bool = true
+
     /// Active session project IDs in activation order (first activated = first in array)
     var activeProjectIdsOrdered: [UUID] = []
 
@@ -112,6 +115,12 @@ struct LauncherView: View {
             // Also try after a delay to ensure terminal has released focus
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 keyboardViewId = UUID()
+            }
+
+            // Ignore controller input briefly to prevent stale events from triggering
+            ignoreControllerInput = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                ignoreControllerInput = false
             }
 
             // Start controller discovery
@@ -264,6 +273,7 @@ struct LauncherView: View {
             .compactMap { $0 }
             .receive(on: DispatchQueue.main)
             .sink { [self] direction in
+                guard !ignoreControllerInput else { return }
                 guard !showSessionPicker else { return }
                 let projects = filteredProjects
                 guard !projects.isEmpty else { return }
@@ -286,6 +296,7 @@ struct LauncherView: View {
             .compactMap { $0 }
             .receive(on: DispatchQueue.main)
             .sink { [self] button in
+                guard !ignoreControllerInput else { return }
                 let projects = filteredProjects
                 guard !projects.isEmpty else { return }
 

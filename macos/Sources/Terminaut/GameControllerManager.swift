@@ -435,12 +435,26 @@ class GameControllerManager: ObservableObject {
     private func handleDirection(_ direction: ControllerDirection) {
         DispatchQueue.main.async {
             self.lastDirection = direction
+            // Clear after a short delay to prevent stale values when views re-subscribe
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                if self.lastDirection == direction {
+                    self.lastDirection = nil
+                }
+            }
         }
     }
 
     private func handleButton(_ button: ControllerButton) {
         DispatchQueue.main.async {
+            print("🎮 Button: \(button.rawValue)")
             self.lastButtonPress = button
+            // Clear after a delay to prevent stale values when views re-subscribe
+            // Use longer delay to ensure all subscribers have processed the event
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if self.lastButtonPress == button {
+                    self.lastButtonPress = nil
+                }
+            }
         }
     }
 }
