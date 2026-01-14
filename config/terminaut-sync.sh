@@ -1,6 +1,6 @@
 #!/bin/bash
-# Mr StatusLine - Claude Code statusline
-# Based on cc-statusline with actual output for terminal display
+# Terminaut Sync - Syncs Claude Code session state to Terminaut dashboard
+# Runs on every Claude Code prompt via statusLine hook
 
 # Ensure PATH includes common tool locations (GUI apps don't inherit shell PATH)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
@@ -233,10 +233,14 @@ if [ "$HAS_JQ" -eq 1 ]; then
   # Extract background tasks from JSONL transcript
   background_tasks="[]"
   TASK_NAMES_FILE="$HOME/.terminaut/task-names.json"
+  TASK_STATUS_FILE="$HOME/.terminaut/task-status.json"
 
   # Ensure task names cache file exists
   if [ ! -f "$TASK_NAMES_FILE" ]; then
     echo '{}' > "$TASK_NAMES_FILE"
+  fi
+  if [ ! -f "$TASK_STATUS_FILE" ]; then
+    echo '{}' > "$TASK_STATUS_FILE"
   fi
 
   if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
@@ -246,8 +250,14 @@ if [ "$HAS_JQ" -eq 1 ]; then
       archived_tasks=$(jq -r '.archived[]? // empty' "$HOME/.terminaut/tasks.json" 2>/dev/null | tr '\n' '|')
     fi
 
-    # Load cached task names
+    # Load cached task names and status
     cached_names=$(cat "$TASK_NAMES_FILE" 2>/dev/null || echo '{}')
+    cached_status=$(cat "$TASK_STATUS_FILE" 2>/dev/null || echo '{}')
+
+    # Check for completed tasks - look for TaskOutput results in transcript
+    # TaskOutput is called when reading background task results
+    completed_sessions=$(grep '"name":"TaskOutput"' "$transcript_path" 2>/dev/null | \
+      grep -oE 'session_01[a-zA-Z0-9]{20,}' | sort -u | tr '\n' '|')
 
     # Extract session IDs from background-task-output blocks
     # Note: Real session IDs are like session_01XyZ123... (start with 01, 20+ chars total)
@@ -262,6 +272,23 @@ if [ "$HAS_JQ" -eq 1 ]; then
             continue
           fi
           web_url="https://claude.ai/code/$session_id"
+
+          # Determine task status
+          task_status="running"
+          if [ -n "$completed_sessions" ] && echo "$completed_sessions" | grep -q "$session_id"; then
+            task_status="completed"
+          fi
+
+          # Get cached started timestamp or set new one
+          started_at=$(echo "$cached_status" | jq -r --arg id "$session_id" '.[$id].startedAt // empty' 2>/dev/null)
+          if [ -z "$started_at" ] || [ "$started_at" = "null" ]; then
+            started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            # Update status cache with start time
+            tmp_status=$(mktemp)
+            jq --arg id "$session_id" --arg ts "$started_at" \
+              '. + {($id): {startedAt: $ts}}' "$TASK_STATUS_FILE" > "$tmp_status" 2>/dev/null && \
+              mv "$tmp_status" "$TASK_STATUS_FILE"
+          fi
 
           # Check for cached smart name
           cached_name=$(echo "$cached_names" | jq -r --arg id "$session_id" '.[$id] // empty' 2>/dev/null)
@@ -293,7 +320,7 @@ if [ "$HAS_JQ" -eq 1 ]; then
             fi
           fi
 
-          echo "{\"sessionId\":\"$session_id\",\"description\":\"$desc_escaped\",\"webUrl\":\"$web_url\"}"
+          echo "{\"sessionId\":\"$session_id\",\"description\":\"$desc_escaped\",\"webUrl\":\"$web_url\",\"status\":\"$task_status\",\"startedAt\":\"$started_at\"}"
         fi
       done | jq -s 'unique_by(.sessionId)' 2>/dev/null || echo "[]")
   fi

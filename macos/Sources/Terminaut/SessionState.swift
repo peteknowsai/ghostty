@@ -48,6 +48,16 @@ struct SessionState: Codable {
         let sessionId: String        // "session_01QyJaqsWfPirdYTWAmM8uRo"
         let description: String      // from <background-task-input>
         let webUrl: String           // "https://claude.ai/code/session_..."
+        let status: String?          // "running" or "completed"
+        let startedAt: String?       // ISO timestamp when task started
+
+        var isRunning: Bool {
+            status?.lowercased() == "running"
+        }
+
+        var isCompleted: Bool {
+            status?.lowercased() == "completed"
+        }
     }
 
     /// Context window usage data from Claude Code
@@ -190,8 +200,9 @@ class SessionStateWatcher: ObservableObject {
         readState(from: url)
 
         // Start polling timer as fallback (file watcher can be unreliable with atomic writes)
+        // Poll every 0.5s for faster task status updates
         scanTimer?.invalidate()
-        scanTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        scanTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self, let url = self.currentStateFile else { return }
             self.readState(from: url)
         }

@@ -15,10 +15,17 @@ struct TerminautRootView: View {
             if coordinator.showLauncher {
                 LauncherView(
                     projectStore: ProjectStore.shared,
-                    activeProjectIdsOrdered: coordinator.activeProjectIdsOrdered
-                ) { project in
-                    coordinator.launchProject(project)
-                }
+                    activeProjectIdsOrdered: coordinator.activeProjectIdsOrdered,
+                    onSelect: { project in
+                        coordinator.launchProject(project)
+                    },
+                    onFreshSession: { project in
+                        coordinator.launchFreshSession(project)
+                    },
+                    onResumeSession: { project, sessionId in
+                        coordinator.resumeSession(project, sessionId: sessionId)
+                    }
+                )
                 .transition(.opacity)
             } else if let project = coordinator.activeProject {
                 TerminautSessionView(
