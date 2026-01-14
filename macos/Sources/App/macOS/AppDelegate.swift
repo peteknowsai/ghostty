@@ -1314,6 +1314,7 @@ extension AppDelegate {
             font-family = SF Mono Terminal
             font-size = 18
             adjust-cell-height = 10%
+            font-thicken = true
 
             # Colors (matches Terminal.app Basic profile)
             background = 191D27
